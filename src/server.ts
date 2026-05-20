@@ -1,9 +1,13 @@
 import express,{Request,Response,NextFunction} from 'express';
 import {randomBytes} from 'crypto';
+import {readFileSync} from 'fs';
+import {join,dirname} from 'path';
+import {fileURLToPath} from 'url';
 import {RobloxProxy} from './roblox-proxy.js';
 import {generateKeys,listKeys,deleteKey,unlockKey,redeemKey,validateUserSession,linkDiscordToSession,adminLogin,isAdmin,getPaused,setPaused} from './key-store.js';
 import {DISCORD_ENABLED,buildAuthUrl,exchangeCode,fetchSelf,fetchGuildMember,findGuildMemberByName} from './discord.js';
 
+const __dir=dirname(fileURLToPath(import.meta.url));
 const app=express();
 app.use(express.json());
 app.set('trust proxy',true);
@@ -25,6 +29,7 @@ const ip=(req:Request)=>((req.headers['x-forwarded-for']||'') as string).split('
 const auth=async(req:Request,res:Response)=>{const t=(req.headers['x-admin-token'] as string)||(req.headers.authorization||'').replace(/^Bearer /,'');if(!(await isAdmin(t))){res.status(401).json({error:'unauthorized'});return false;}return true;};
 
 app.get('/health',(_,res)=>res.json({ok:true}));
+app.get('/admin',(_,res)=>{try{res.send(readFileSync(join(__dir,'../public/admin.html'),'utf8'))}catch(e){res.status(500).send(String(e))}});
 app.get('/search',async(req,res)=>{const k=String(req.query.keyword||'');if(!k)return res.status(400).json({error:'keyword required'});try{send(res,await proxy.search(k,Number(req.query.limit||10)))}catch(e){res.status(502).json({error:String(e)})}});
 app.post('/lookup',async(req,res)=>{const u=req.body?.usernames||[];if(!u.length)return res.status(400).json({error:'usernames required'});try{send(res,await proxy.lookupByUsernames(u))}catch(e){res.status(502).json({error:String(e)})}});
 app.get('/user/:id',async(req,res)=>{try{send(res,await proxy.lookupById(req.params.id))}catch(e){res.status(502).json({error:String(e)})}});
