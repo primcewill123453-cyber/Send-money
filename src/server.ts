@@ -1,66 +1,92 @@
-import{readFileSync,writeFileSync,existsSync,mkdirSync}from'fs';
+import express,{Request,Response,NextFunction}from'express';
+import{randomBytes}from'crypto';
+import{readFileSync}from'fs';
 import{join,dirname}from'path';
 import{fileURLToPath}from'url';
-import{randomBytes,createHash}from'crypto';
+import{RobloxProxy}from'./roblox-proxy.js';
+import{generateKeys,listKeys,deleteKey,unlockKey,redeemKey,validateUserSession,linkDiscordToSession,getPaused,setPaused}from'./key-store.js';
+import{DISCORD_ENABLED,buildAuthUrl,exchangeCode,fetchSelf,fetchGuildMember,findGuildMemberByName}from'./discord.js';
 
 const __dir=dirname(fileURLToPath(import.meta.url));
-const DATA=join(__dir,'../data.json');
+const app=express();
+app.use(express.json());
+app.set('trust proxy',true);
 
-export type KeyRecord={code:string;lockedIp:string|null;redeemedAt:string|null;createdAt:string;expiresAt:string|null;note:string};
-type Session={token:string;kind:'admin'|'user';keyCode:string|null;ip:string|null;createdAt:string;discordId:string|null;discordUsername:string|null;discordAvatarUrl:string|null};
-type DB={keys:KeyRecord[];sessions:Session[];paused:boolean};
+const ORIGINS=(process.env.ALLOWED_ORIGINS||'*').split(',').map(s=>s.trim()).filter(Boolean);
+app.use((req:Request,res:Response,next:NextFunction)=>{
+  const o=req.headers.origin||'';
+  if(ORIGINS.includes('*')||(o&&ORIGINS.includes(o))){res.setHeader('Access-Control-Allow-Origin',o||'*');res.setHeader('Access-Control-Allow-Credentials','true');res.setHeader('Vary','Origin');}
+  res.setHeader('Access-Control-Allow-Methods','GET,POST,DELETE,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers','Content-Type,Authorization,X-Admin-Token,X-User-Token');
+  if(req.method==='OPTIONS'){res.sendStatus(204);return;}
+  next();
+});
 
-function read():DB{try{if(existsSync(DATA))return JSON.parse(readFileSync(DATA,'utf8'));}catch{}return{keys:[],sessions:[],paused:false};}
-function save(db:DB){writeFileSync(DATA,JSON.stringify(db,null,2));}
+const proxy=RobloxProxy.from();
+const PORT=Number(process.env.PORT||3000);
+const send=(res:Response,p:{status:number;body:string})=>res.status(p.status).type('application/json').send(p.body);
+const ip=(req:Request)=>((req.headers['x-forwarded-for']||'')as string).split(',')[0]?.trim()||req.ip||'unknown';
 
-const genCode=()=>{const p=()=>randomBytes(2).toString('hex').toUpperCase();return`${p()}-${p()}-${p()}-${p()}`;};
-const genToken=()=>randomBytes(24).toString('hex');
-const hashPw=(pw:string)=>createHash('sha256').update(pw).digest('hex');
+app.get('/health',(_,res)=>res.json({ok:true}));
+app.get('/admin',(_,res)=>{try{res.send(readFileSync(join(__dir,'../public/admin.html'),'utf8'))}catch(e){res.status(500).send(String(e))}});
+app.get('/search',async(req,res)=>{const k=String(req.query.keyword||'');if(!k)return res.status(400).json({error:'keyword required'});try{send(res,await proxy.search(k,Number(req.query.limit||10)))}catch(e){res.status(502).json({error:String(e)})}});
+app.post('/lookup',async(req,res)=>{const u=req.body?.usernames||[];if(!u.length)return res.status(400).json({error:'usernames required'});try{send(res,await proxy.lookupByUsernames(u))}catch(e){res.status(502).json({error:String(e)})}});
+app.get('/user/:id',async(req,res)=>{try{send(res,await proxy.lookupById(req.params.id))}catch(e){res.status(502).json({error:String(e)})}});
+app.get('/avatars',async(req,res)=>{const u=String(req.query.userIds||'');if(!u)return res.status(400).json({error:'userIds required'});try{send(res,await proxy.avatars(u))}catch(e){res.status(502).json({error:String(e)})}});
+app.get('/friends/count/:id',async(req,res)=>{try{send(res,await proxy.friendCount(req.params.id))}catch(e){res.status(502).json({error:String(e)})}});
+app.get('/resolve/:username',async(req,res)=>{try{send(res,await proxy.resolveByName(req.params.username))}catch(e){res.status(502).json({error:String(e)})}});
+app.get('/site/status',(_,res)=>{try{res.json({paused:getPaused()})}catch(e){res.status(500).json({error:String(e)})}});
 
-export function generateKeys(count=1,note='',expiresAt:string|null=null):KeyRecord[]{
-  const db=read();const made:KeyRecord[]=[];
-  for(let i=0;i<count;i++){const k:KeyRecord={code:genCode(),lockedIp:null,redeemedAt:null,createdAt:new Date().toISOString(),expiresAt,note};db.keys.push(k);made.push(k);}
-  save(db);return made;
-}
-export function listKeys():KeyRecord[]{return read().keys.slice().reverse();}
-export function deleteKey(code:string):boolean{const db=read();const l=db.keys.length;db.keys=db.keys.filter(k=>k.code!==code);save(db);return db.keys.length<l;}
-export function unlockKey(code:string):boolean{const db=read();const k=db.keys.find(k=>k.code===code);if(!k)return false;k.lockedIp=null;k.redeemedAt=null;save(db);return true;}
+app.post('/keys/redeem',(req,res)=>{
+  const code=String(req.body?.code||'').trim(),du=String(req.body?.discordUsername||'').trim();
+  if(!code)return res.status(400).json({error:'code required'});
+  try{
+    if(getPaused())return res.status(503).json({error:'site is paused'});
+    const r=redeemKey(code,ip(req));
+    if(!r.ok)return res.status(403).json({error:r.reason});
+    res.json({token:r.token,key:r.key});
+  }catch(e){res.status(500).json({error:String(e)})}
+});
 
-export type RedeemResult={ok:true;token:string;key:KeyRecord}|{ok:false;reason:string};
-export function redeemKey(code:string,ip:string):RedeemResult{
-  const db=read();
-  const key=db.keys.find(k=>k.code===code);
-  if(!key)return{ok:false,reason:'invalid'};
-  if(key.expiresAt&&new Date(key.expiresAt).getTime()<Date.now())return{ok:false,reason:'expired'};
-  if(key.lockedIp&&key.lockedIp!==ip)return{ok:false,reason:'ip-locked'};
-  if(!key.lockedIp){key.lockedIp=ip;key.redeemedAt=new Date().toISOString();}
-  const token=genToken();
-  db.sessions.push({token,kind:'user',keyCode:code,ip,createdAt:new Date().toISOString(),discordId:null,discordUsername:null,discordAvatarUrl:null});
-  save(db);return{ok:true,token,key};
-}
+app.get('/keys/me',async(req,res)=>{
+  const t=(req.headers['x-user-token']as string)||String(req.query.token||'');
+  if(!t)return res.status(401).json({error:'no token'});
+  try{
+    const s=validateUserSession(t,ip(req));
+    if(!s)return res.status(401).json({error:'invalid'});
+    const m=s.discord.id?await fetchGuildMember(s.discord.id).catch(()=>null):null;
+    res.json({key:s.key,discord:s.discord,member:m,discordEnabled:DISCORD_ENABLED});
+  }catch(e){res.status(500).json({error:String(e)})}
+});
 
-export type UserSession={key:KeyRecord;discord:{id:string|null;username:string|null;avatarUrl:string|null}};
-export function validateUserSession(token:string,ip:string):UserSession|null{
-  const db=read();
-  const sess=db.sessions.find(s=>s.token===token&&s.kind==='user');
-  if(!sess)return null;
-  if(sess.ip&&sess.ip!==ip)return null;
-  const key=db.keys.find(k=>k.code===sess.keyCode);
-  if(!key)return null;
-  if(key.expiresAt&&new Date(key.expiresAt).getTime()<Date.now())return null;
-  return{key,discord:{id:sess.discordId,username:sess.discordUsername,avatarUrl:sess.discordAvatarUrl}};
-}
-export function linkDiscordToSession(token:string,discord:{id:string;username:string;avatarUrl:string}):boolean{
-  const db=read();const sess=db.sessions.find(s=>s.token===token&&s.kind==='user');
-  if(!sess)return false;sess.discordId=discord.id;sess.discordUsername=discord.username;sess.discordAvatarUrl=discord.avatarUrl;save(db);return true;
-}
-export function adminLogin(password:string):string|null{
-  const expected=process.env.ADMIN_PASSWORD||'admin';
-  if(hashPw(password)!==hashPw(expected))return null;
-  const db=read();const token=genToken();
-  db.sessions.push({token,kind:'admin',keyCode:null,ip:null,createdAt:new Date().toISOString(),discordId:null,discordUsername:null,discordAvatarUrl:null});
-  save(db);return token;
-}
-export function isAdmin(token:string|undefined|null):boolean{if(!token)return false;return read().sessions.some(s=>s.token===token&&s.kind==='admin');}
-export function getPaused():boolean{return read().paused;}
-export function setPaused(paused:boolean):void{const db=read();db.paused=paused;save(db);}
+const states=new Map<string,{token:string;createdAt:number}>();
+const ruri=(req:Request)=>`${(req.headers['x-forwarded-proto']as string)||req.protocol}://${req.headers.host}/auth/discord/callback`;
+
+app.get('/auth/discord/login',(req,res)=>{
+  if(!DISCORD_ENABLED)return res.status(503).json({error:'discord not configured'});
+  const t=(req.headers['x-user-token']as string)||String(req.query.token||'');
+  if(!t)return res.status(401).json({error:'redeem a key first'});
+  const now=Date.now();for(const[k,v]of states)if(now-v.createdAt>600000)states.delete(k);
+  const state=randomBytes(16).toString('hex');states.set(state,{token:t,createdAt:Date.now()});
+  res.redirect(buildAuthUrl(ruri(req),state));
+});
+
+app.get('/auth/discord/callback',async(req,res)=>{
+  const code=String(req.query.code||''),state=String(req.query.state||'');
+  const e=states.get(state);states.delete(state);
+  if(!code||!e)return res.status(400).send('Invalid Discord callback');
+  try{
+    const at=await exchangeCode(code,ruri(req));if(!at)throw new Error('exchange failed');
+    const self=await fetchSelf(at);if(!self)throw new Error('fetch self failed');
+    linkDiscordToSession(e.token,{id:self.id,username:self.globalName||self.username,avatarUrl:self.avatarUrl});
+    res.send(`<!doctype html><body style="background:#000;color:#fff;font-family:system-ui;display:flex;align-items:center;justify-content:center;min-height:100vh;flex-direction:column;gap:16px"><div style="font-size:20px;font-weight:700">Discord linked!</div><div style="color:#8a8a8a">You can close this window.</div><script>setTimeout(()=>{try{window.opener&&window.opener.postMessage('discord-linked','*');window.close()}catch(e){}},600)</script></body>`);
+  }catch(err){res.status(500).send(`Discord login failed: ${String(err)}`)}
+});
+
+app.get('/admin/keys',(_,res)=>{try{res.json({keys:listKeys()})}catch(e){res.status(500).json({error:String(e)})}});
+app.post('/admin/keys',(req,res)=>{try{res.json({keys:generateKeys(Math.max(1,Math.min(100,Number(req.body?.count||1))),String(req.body?.note||''),req.body?.expiresAt||null)})}catch(e){res.status(500).json({error:String(e)})}});
+app.delete('/admin/keys/:code',(req,res)=>{try{res.json({ok:deleteKey(req.params.code)})}catch(e){res.status(500).json({error:String(e)})}});
+app.post('/admin/keys/:code/unlock',(req,res)=>{try{res.json({ok:unlockKey(req.params.code)})}catch(e){res.status(500).json({error:String(e)})}});
+app.post('/admin/site/pause',(req,res)=>{const p=!!req.body?.paused;try{setPaused(p);res.json({ok:true,paused:p})}catch(e){res.status(500).json({error:String(e)})}});
+
+app.listen(PORT,()=>console.log(`🚀 Ready on port ${PORT}`));
