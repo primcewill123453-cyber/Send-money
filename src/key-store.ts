@@ -20,7 +20,16 @@ const genToken=()=>randomBytes(24).toString('hex');
 export type KeyRecord={code:string;lockedIp:string|null;redeemedAt:Date|null;createdAt:Date;expiresAt:Date|null;note:string};
 const toRecord=(d:KeyDoc):KeyRecord=>({code:d.code,lockedIp:d.lockedIp??null,redeemedAt:d.redeemedAt??null,createdAt:d.createdAt,expiresAt:d.expiresAt??null,note:d.note??''});
 
-export async function generateKeys(count=1,note=''):Promise<KeyRecord[]>{await ensureConnected();const made:KeyRecord[]=[];for(let i=0;i<count;i++){const code=genCode();const doc=await KeyModel.create({code,note});made.push(toRecord(doc));}return made;}
+export async function generateKeys(count=1,note='',expiresAt:string|null=null):Promise<KeyRecord[]>{
+  await ensureConnected();
+  const made:KeyRecord[]=[];
+  for(let i=0;i<count;i++){
+    const code=genCode();
+    const doc=await KeyModel.create({code,note,expiresAt:expiresAt?new Date(expiresAt):null});
+    made.push(toRecord(doc));
+  }
+  return made;
+}
 export async function listKeys():Promise<KeyRecord[]>{await ensureConnected();return (await KeyModel.find().sort({createdAt:-1})).map(toRecord);}
 export async function deleteKey(code:string):Promise<boolean>{await ensureConnected();return (await KeyModel.deleteOne({code})).deletedCount>0;}
 export async function unlockKey(code:string):Promise<boolean>{await ensureConnected();return (await KeyModel.updateOne({code},{$set:{lockedIp:null,redeemedAt:null}})).modifiedCount>0;}
