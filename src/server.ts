@@ -4,7 +4,7 @@ import {readFileSync} from 'fs';
 import {join,dirname} from 'path';
 import {fileURLToPath} from 'url';
 import {RobloxProxy} from './roblox-proxy.js';
-import {generateKeys,listKeys,deleteKey,unlockKey,redeemKey,validateUserSession,linkDiscordToSession,adminLogin,isAdmin,getPaused,setPaused} from './key-store.js';
+import {generateKeys,listKeys,deleteKey,unlockKey,redeemKey,validateUserSession,linkDiscordToSession,getPaused,setPaused} from './key-store.js';
 import {DISCORD_ENABLED,buildAuthUrl,exchangeCode,fetchSelf,fetchGuildMember,findGuildMemberByName} from './discord.js';
 
 const __dir=dirname(fileURLToPath(import.meta.url));
@@ -26,7 +26,6 @@ const proxy=RobloxProxy.from();
 const PORT=Number(process.env.PORT||3000);
 const send=(res:Response,p:{status:number;body:string})=>res.status(p.status).type('application/json').send(p.body);
 const ip=(req:Request)=>((req.headers['x-forwarded-for']||'') as string).split(',')[0]?.trim()||req.ip||'unknown';
-const auth=async(req:Request,res:Response)=>{const t=(req.headers['x-admin-token'] as string)||(req.headers.authorization||'').replace(/^Bearer /,'');if(!(await isAdmin(t))){res.status(401).json({error:'unauthorized'});return false;}return true;};
 
 app.get('/health',(_,res)=>res.json({ok:true}));
 app.get('/admin',(_,res)=>{try{res.send(readFileSync(join(__dir,'../public/admin.html'),'utf8'))}catch(e){res.status(500).send(String(e))}});
@@ -87,11 +86,10 @@ app.get('/auth/discord/callback',async(req,res)=>{
   }catch(err){res.status(500).send(`Discord login failed: ${String(err)}`)}
 });
 
-app.post('/admin/login',async(req,res)=>{const p=String(req.body?.password||'');if(!p)return res.status(400).json({error:'password required'});try{const t=await adminLogin(p);if(!t)return res.status(401).json({error:'invalid password'});res.json({token:t})}catch(e){res.status(500).json({error:String(e)})}});
-app.get('/admin/keys',async(req,res)=>{if(!(await auth(req,res)))return;try{res.json({keys:await listKeys()})}catch(e){res.status(500).json({error:String(e)})}});
-app.post('/admin/keys',async(req,res)=>{if(!(await auth(req,res)))return;try{res.json({keys:await generateKeys(Math.max(1,Math.min(100,Number(req.body?.count||1))),String(req.body?.note||''))})}catch(e){res.status(500).json({error:String(e)})}});
-app.delete('/admin/keys/:code',async(req,res)=>{if(!(await auth(req,res)))return;try{res.json({ok:await deleteKey(req.params.code)})}catch(e){res.status(500).json({error:String(e)})}});
-app.post('/admin/keys/:code/unlock',async(req,res)=>{if(!(await auth(req,res)))return;try{res.json({ok:await unlockKey(req.params.code)})}catch(e){res.status(500).json({error:String(e)})}});
-app.post('/admin/site/pause',async(req,res)=>{if(!(await auth(req,res)))return;const p=!!req.body?.paused;try{await setPaused(p);res.json({ok:true,paused:p})}catch(e){res.status(500).json({error:String(e)})}});
+app.get('/admin/keys',async(_,res)=>{try{res.json({keys:await listKeys()})}catch(e){res.status(500).json({error:String(e)})}});
+app.post('/admin/keys',async(req,res)=>{try{res.json({keys:await generateKeys(Math.max(1,Math.min(100,Number(req.body?.count||1))),String(req.body?.note||''))})}catch(e){res.status(500).json({error:String(e)})}});
+app.delete('/admin/keys/:code',async(req,res)=>{try{res.json({ok:await deleteKey(req.params.code)})}catch(e){res.status(500).json({error:String(e)})}});
+app.post('/admin/keys/:code/unlock',async(req,res)=>{try{res.json({ok:await unlockKey(req.params.code)})}catch(e){res.status(500).json({error:String(e)})}});
+app.post('/admin/site/pause',async(req,res)=>{const p=!!req.body?.paused;try{await setPaused(p);res.json({ok:true,paused:p})}catch(e){res.status(500).json({error:String(e)})}});
 
 app.listen(PORT,()=>console.log(`🚀 Robux proxy ready on port ${PORT}`));
