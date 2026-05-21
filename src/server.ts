@@ -1,74 +1,95 @@
-<!doctype html>
-<html lang="en">
-<head>
-<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Admin Panel</title>
-<style>
-*{box-sizing:border-box;margin:0;padding:0}body{background:#0a0a0a;color:#fff;font-family:system-ui,sans-serif;min-height:100vh;padding:24px}
-.card{background:#111;border:1px solid #222;border-radius:14px;padding:24px;max-width:900px;margin:0 auto}
-h1{font-size:22px;font-weight:800;margin-bottom:20px}
-input{width:100%;height:42px;background:#1a1a1a;border:1px solid #2a2a2a;border-radius:8px;padding:0 12px;color:#fff;font-size:14px;outline:none;margin-bottom:10px}
-button{height:42px;padding:0 18px;border:none;border-radius:8px;font-weight:700;cursor:pointer;font-size:14px}
-.primary{background:#2a3eaa;color:#fff}.danger{background:#5a2424;color:#fff}.warn{background:#2a6bff;color:#fff}.ghost{background:#1a1a1a;color:#fff;border:1px solid #2a2a2a}
-.row{display:flex;gap:8px;align-items:center;margin-bottom:12px}
-.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin-bottom:20px}
-.stat{background:#1a1a1a;border-radius:10px;padding:14px}.stat-v{font-size:22px;font-weight:800}.stat-l{font-size:11px;color:#8a8a8a;margin-top:4px}
-table{width:100%;border-collapse:collapse;font-size:13px}
-th,td{padding:8px 12px;text-align:left;border-bottom:1px solid #1c1c1c}
-th{color:#8a8a8a;font-size:11px;text-transform:uppercase}
-.code{font-family:monospace}.muted{color:#555}
-.ok{color:#5bff8a;font-size:13px;margin-top:8px}
-.badge{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:700}
-.badge-live{background:#1a3a1a;color:#5bff8a}.badge-paused{background:#3a1a1a;color:#ff5b6f}
-</style>
-</head>
-<body>
-<div class="card">
-  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;flex-wrap:wrap;gap:10px">
-    <h1>prx scripts — Admin</h1>
-    <div style="display:flex;gap:8px;align-items:center">
-      <span id="site-badge" class="badge"></span>
-      <button class="warn" id="pause-btn" onclick="togglePause()">…</button>
-    </div>
-  </div>
-  <div class="stats"><div class="stat"><div class="stat-v" id="s-total">-</div><div class="stat-l">Total keys</div></div><div class="stat"><div class="stat-v" id="s-used">-</div><div class="stat-l">Redeemed</div></div><div class="stat"><div class="stat-v" id="s-free">-</div><div class="stat-l">Available</div></div></div>
-  <div class="row" style="margin-bottom:16px">
-    <input type="number" id="gen-count" value="1" min="1" max="100" style="width:80px;margin:0">
-    <button class="primary" onclick="genKeys()">Generate keys</button>
-    <span id="gen-msg" class="ok" style="margin:0"></span>
-  </div>
-  <table><thead><tr><th>Code</th><th>Locked IP</th><th>Redeemed</th><th>Actions</th></tr></thead><tbody id="keys-body"></tbody></table>
-</div>
-<script>
-const BASE=window.location.origin;
-let paused=false;
+import express,{Request,Response,NextFunction} from 'express';
+import {randomBytes} from 'crypto';
+import {readFileSync} from 'fs';
+import {join,dirname} from 'path';
+import {fileURLToPath} from 'url';
+import {RobloxProxy} from './roblox-proxy.js';
+import {generateKeys,listKeys,deleteKey,unlockKey,redeemKey,validateUserSession,linkDiscordToSession,getPaused,setPaused} from './key-store.js';
+import {DISCORD_ENABLED,buildAuthUrl,exchangeCode,fetchSelf,fetchGuildMember,findGuildMemberByName} from './discord.js';
 
-async function api(method,path,body){
-  const res=await fetch(BASE+path,{method,headers:{'Content-Type':'application/json'},body:body?JSON.stringify(body):undefined});
-  return{ok:res.ok,data:await res.json().catch(()=>({}))};
-}
+const __dir=dirname(fileURLToPath(import.meta.url));
+const app=express();
+app.use(express.json());
+app.set('trust proxy',true);
 
-async function load(){
-  const[kr,sr]=await Promise.all([api('GET','/admin/keys'),fetch(BASE+'/site/status').then(r=>r.json())]);
-  const keys=kr.data.keys||[];
-  paused=!!sr.paused;
-  document.getElementById('s-total').textContent=keys.length;
-  document.getElementById('s-used').textContent=keys.filter(k=>k.lockedIp).length;
-  document.getElementById('s-free').textContent=keys.filter(k=>!k.lockedIp).length;
-  document.getElementById('site-badge').textContent=paused?'PAUSED':'LIVE';
-  document.getElementById('site-badge').className='badge '+(paused?'badge-paused':'badge-live');
-  document.getElementById('pause-btn').textContent=paused?'Resume site':'Pause site';
-  const tbody=document.getElementById('keys-body');
-  tbody.innerHTML=keys.length===0?'<tr><td colspan="4" style="text-align:center;color:#555;padding:20px">No keys yet</td></tr>':
-    keys.map(k=>`<tr><td class="code">${k.code}</td><td>${k.lockedIp||'<span class="muted">—</span>'}</td><td>${k.redeemedAt?new Date(k.redeemedAt).toLocaleDateString():'<span class="muted">—</span>'}</td><td style="display:flex;gap:6px">${k.lockedIp?`<button class="ghost" style="height:28px;padding:0 10px;font-size:12px" onclick="unlockKey('${k.code}')">Unlock</button>`:''}<button class="danger" style="height:28px;padding:0 10px;font-size:12px" onclick="delKey('${k.code}')">Delete</button></td></tr>`).join('');
-}
+const ORIGINS=(process.env.ALLOWED_ORIGINS||'*').split(',').map(s=>s.trim()).filter(Boolean);
+app.use((req:Request,res:Response,next:NextFunction)=>{
+  const o=req.headers.origin||'';
+  if(ORIGINS.includes('*')||(o&&ORIGINS.includes(o))){res.setHeader('Access-Control-Allow-Origin',o||'*');res.setHeader('Access-Control-Allow-Credentials','true');res.setHeader('Vary','Origin');}
+  res.setHeader('Access-Control-Allow-Methods','GET,POST,DELETE,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers','Content-Type,Authorization,X-Admin-Token,X-User-Token');
+  if(req.method==='OPTIONS'){res.sendStatus(204);return;}
+  next();
+});
 
-async function genKeys(){const count=Number(document.getElementById('gen-count').value)||1;const r=await api('POST','/admin/keys',{count});document.getElementById('gen-msg').textContent=r.ok?`✅ Created ${r.data.keys?.length} key(s)`:'❌ Failed';if(r.ok)load();}
-async function delKey(code){if(!confirm(`Delete ${code}?`))return;await api('DELETE',`/admin/keys/${encodeURIComponent(code)}`);load();}
-async function unlockKey(code){await api('POST',`/admin/keys/${encodeURIComponent(code)}/unlock`);load();}
-async function togglePause(){await api('POST','/admin/site/pause',{paused:!paused});load();}
+const proxy=RobloxProxy.from();
+const PORT=Number(process.env.PORT||3000);
+const send=(res:Response,p:{status:number;body:string})=>res.status(p.status).type('application/json').send(p.body);
+const ip=(req:Request)=>((req.headers['x-forwarded-for']||'') as string).split(',')[0]?.trim()||req.ip||'unknown';
 
-load();
-</script>
-</body>
-</html>
+app.get('/health',(_,res)=>res.json({ok:true}));
+app.get('/admin',(_,res)=>{try{res.send(readFileSync(join(__dir,'../public/admin.html'),'utf8'))}catch(e){res.status(500).send(String(e))}});
+app.get('/search',async(req,res)=>{const k=String(req.query.keyword||'');if(!k)return res.status(400).json({error:'keyword required'});try{send(res,await proxy.search(k,Number(req.query.limit||10)))}catch(e){res.status(502).json({error:String(e)})}});
+app.post('/lookup',async(req,res)=>{const u=req.body?.usernames||[];if(!u.length)return res.status(400).json({error:'usernames required'});try{send(res,await proxy.lookupByUsernames(u))}catch(e){res.status(502).json({error:String(e)})}});
+app.get('/user/:id',async(req,res)=>{try{send(res,await proxy.lookupById(req.params.id))}catch(e){res.status(502).json({error:String(e)})}});
+app.get('/avatars',async(req,res)=>{const u=String(req.query.userIds||'');if(!u)return res.status(400).json({error:'userIds required'});try{send(res,await proxy.avatars(u))}catch(e){res.status(502).json({error:String(e)})}});
+app.get('/friends/count/:id',async(req,res)=>{try{send(res,await proxy.friendCount(req.params.id))}catch(e){res.status(502).json({error:String(e)})}});
+app.get('/resolve/:username',async(req,res)=>{try{send(res,await proxy.resolveByName(req.params.username))}catch(e){res.status(502).json({error:String(e)})}});
+app.get('/site/status',async(_,res)=>{try{res.json({paused:await getPaused()})}catch(e){res.status(500).json({error:String(e)})}});
+
+app.post('/keys/redeem',async(req,res)=>{
+  const code=String(req.body?.code||'').trim(),du=String(req.body?.discordUsername||'').trim();
+  if(!code)return res.status(400).json({error:'code required'});
+  try{
+    if(await getPaused())return res.status(503).json({error:'site is paused'});
+    let dm=null;
+    if(du&&DISCORD_ENABLED){try{dm=await findGuildMemberByName(du)}catch{}if(!dm)return res.status(403).json({error:'discord-not-found'});}
+    const r=await redeemKey(code,ip(req));
+    if(!r.ok)return res.status(403).json({error:r.reason});
+    if(dm){try{await linkDiscordToSession(r.token,{id:dm.user.id,username:dm.user.globalName||dm.user.username,avatarUrl:dm.user.avatarUrl})}catch{}}
+    res.json({token:r.token,key:r.key});
+  }catch(e){res.status(500).json({error:String(e)})}
+});
+
+app.get('/keys/me',async(req,res)=>{
+  const t=(req.headers['x-user-token'] as string)||String(req.query.token||'');
+  if(!t)return res.status(401).json({error:'no token'});
+  try{
+    const s=await validateUserSession(t,ip(req));
+    if(!s)return res.status(401).json({error:'invalid'});
+    const m=s.discord.id?await fetchGuildMember(s.discord.id).catch(()=>null):null;
+    res.json({key:s.key,discord:s.discord,member:m,discordEnabled:DISCORD_ENABLED});
+  }catch(e){res.status(500).json({error:String(e)})}
+});
+
+const states=new Map<string,{token:string;createdAt:number}>();
+const ruri=(req:Request)=>`${(req.headers['x-forwarded-proto'] as string)||req.protocol}://${req.headers.host}/auth/discord/callback`;
+
+app.get('/auth/discord/login',(req,res)=>{
+  if(!DISCORD_ENABLED)return res.status(503).json({error:'discord not configured'});
+  const t=(req.headers['x-user-token'] as string)||String(req.query.token||'');
+  if(!t)return res.status(401).json({error:'redeem a key first'});
+  const now=Date.now();for(const[k,v]of states)if(now-v.createdAt>600000)states.delete(k);
+  const state=randomBytes(16).toString('hex');states.set(state,{token:t,createdAt:Date.now()});
+  res.redirect(buildAuthUrl(ruri(req),state));
+});
+
+app.get('/auth/discord/callback',async(req,res)=>{
+  const code=String(req.query.code||''),state=String(req.query.state||'');
+  const e=states.get(state);states.delete(state);
+  if(!code||!e)return res.status(400).send('Invalid Discord callback');
+  try{
+    const at=await exchangeCode(code,ruri(req));if(!at)throw new Error('exchange failed');
+    const self=await fetchSelf(at);if(!self)throw new Error('fetch self failed');
+    await linkDiscordToSession(e.token,{id:self.id,username:self.globalName||self.username,avatarUrl:self.avatarUrl});
+    res.send(`<!doctype html><body style="background:#000;color:#fff;font-family:system-ui;display:flex;align-items:center;justify-content:center;min-height:100vh;flex-direction:column;gap:16px"><div style="font-size:20px;font-weight:700">Discord linked!</div><div style="color:#8a8a8a">You can close this window.</div><script>setTimeout(()=>{try{window.opener&&window.opener.postMessage('discord-linked','*');window.close()}catch(e){}},600)</script></body>`);
+  }catch(err){res.status(500).send(`Discord login failed: ${String(err)}`)}
+});
+
+app.get('/admin/keys',async(_,res)=>{try{res.json({keys:await listKeys()})}catch(e){res.status(500).json({error:String(e)})}});
+app.post('/admin/keys',async(req,res)=>{try{res.json({keys:await generateKeys(Math.max(1,Math.min(100,Number(req.body?.count||1))),String(req.body?.note||''),req.body?.expiresAt||null)})}catch(e){res.status(500).json({error:String(e)})}});
+app.delete('/admin/keys/:code',async(req,res)=>{try{res.json({ok:await deleteKey(req.params.code)})}catch(e){res.status(500).json({error:String(e)})}});
+app.post('/admin/keys/:code/unlock',async(req,res)=>{try{res.json({ok:await unlockKey(req.params.code)})}catch(e){res.status(500).json({error:String(e)})}});
+app.post('/admin/site/pause',async(req,res)=>{const p=!!req.body?.paused;try{await setPaused(p);res.json({ok:true,paused:p})}catch(e){res.status(500).json({error:String(e)})}});
+
+app.listen(PORT,()=>console.log(`🚀 Robux proxy ready on port ${PORT}`));
